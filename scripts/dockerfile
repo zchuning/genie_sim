@@ -6,6 +6,8 @@ FROM nvcr.io/nvidia/isaac-sim:4.5.0
 ENV ACCEPT_EULA=Y
 ENV PRIVACY_CONSENT=Y
 
+USER root
+
 # apt deps
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -57,16 +59,25 @@ RUN /isaac-sim/python.sh -m pip install tomli wheel ninja -i https://pypi.tuna.t
 COPY ./requirements_infer.txt /tmp
 RUN pip3 install -r /tmp/requirements_infer.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+# update torch for both system python and issac-sim python
+RUN python3 -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu130
+RUN /isaac-sim/python.sh -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu130
+
+
 # pip install curobo [default to option1]
 # OPTION 1: install from source, which can be slow, please refer to https://curobo.org/get_started/1_install_instructions.html
 RUN git clone https://github.com/NVlabs/curobo.git --depth 1 /tmp/curobo
 RUN cd /tmp && wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
 RUN dpkg -i /tmp/cuda-keyring_1.0-1_all.deb
 RUN apt-get update
-RUN apt-get -y install cuda-toolkit-11-8
+RUN apt-get -y install cuda-toolkit-13-0
+
+# uninstall cuda 11
+RUN /isaac-sim/python.sh -m pip uninstall -y nvidia-cuda-cupti-cu11 nvidia-cuda-nvrtc-cu11 nvidia-cuda-runtime-cu11
+
 # NOTICE!!! Default to RTX4090D that we use, do remember to change TORCH_CUDA_ARCH_LIST for your GPU model, see https://github.com/AgibotTech/genie_sim/issues/4
-ENV CUDA_HOME="/usr/local/cuda-11.8"
-ENV TORCH_CUDA_ARCH_LIST="8.9"
+ENV CUDA_HOME="/usr/local/cuda-13.0"
+ENV TORCH_CUDA_ARCH_LIST="12.0"
 RUN cd /tmp/curobo && /isaac-sim/python.sh -m pip install --no-build-isolation .[isaacsim] -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # OPTION 2: install from pre-built wheel, if you have already built curobo
