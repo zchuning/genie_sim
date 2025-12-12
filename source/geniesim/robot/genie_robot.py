@@ -31,7 +31,7 @@ from geniesim.utils.logger import Logger
 
 logger = Logger()  # Create singleton instance
 
-import ik_solver
+# import ik_solver
 from copy import deepcopy
 
 SIM_REPO_ROOT = os.getenv("SIM_REPO_ROOT")
@@ -180,26 +180,28 @@ class IsaacSimRpcRobot(Robot):
 
     def setup(self):
         self.target_object = None
-        self.left_solver = ik_solver.Solver(
-            part=ik_solver.RobotPart.LEFT_ARM,
-            urdf_path=f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK/{self.ik_cfg}",
-            config_path=str(
-                os.path.join(
-                    f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK", self.ik_solver_cfg
-                )
-            ),
-        )
-        self.right_solver = ik_solver.Solver(
-            part=ik_solver.RobotPart.RIGHT_ARM,
-            urdf_path=f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK/{self.ik_cfg}",
-            config_path=str(
-                os.path.join(
-                    f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK", self.ik_solver_cfg
-                )
-            ),
-        )
-        self.left_solver.set_debug_mode(False)
-        self.right_solver.set_debug_mode(False)
+        self.left_solver = None
+        self.right_solver = None
+        # self.left_solver = ik_solver.Solver(
+        #     part=ik_solver.RobotPart.LEFT_ARM,
+        #     urdf_path=f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK/{self.ik_cfg}",
+        #     config_path=str(
+        #         os.path.join(
+        #             f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK", self.ik_solver_cfg
+        #         )
+        #     ),
+        # )
+        # self.right_solver = ik_solver.Solver(
+        #     part=ik_solver.RobotPart.RIGHT_ARM,
+        #     urdf_path=f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK/{self.ik_cfg}",
+        #     config_path=str(
+        #         os.path.join(
+        #             f"{SIM_REPO_ROOT}/source/geniesim/utils/IK-SDK", self.ik_solver_cfg
+        #         )
+        #     ),
+        # )
+        # self.left_solver.set_debug_mode(False)
+        # self.right_solver.set_debug_mode(False)
 
         # set robot init state
 

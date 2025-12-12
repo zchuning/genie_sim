@@ -141,7 +141,7 @@ done
 
 client_log="client.log"
 timeout_cnt=0
-timeout_thresh=10
+timeout_thresh=60
 
 printf "\nAll started"
 while true; do

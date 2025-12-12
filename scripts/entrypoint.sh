@@ -3,7 +3,7 @@
 set -e
 
 # env
-export ROS_DISTRO=humble
+export ROS_DISTRO=jazzy
 
 # bashrc
 echo "alias omni_python='/isaac-sim/python.sh'" >>~/.bashrc
@@ -12,18 +12,18 @@ echo "alias run_client='omni_python source/geniesim/benchmark/task_benchmark.py 
 echo "alias run_teleop='omni_python source/geniesim/teleop/teleop.py --task_name'" >>~/.bashrc
 echo "alias run_replay='omni_python source/geniesim/teleop/replay_state.py'" >>~/.bashrc
 
-echo "source /opt/ros/$ROS_DISTRO/setup.bash" >>~/.bashrc
+echo "source /isaac-sim/${ROS_DISTRO}_ws/install/setup.bash" >>~/.bashrc
 
 echo "export SIM_ASSETS=/root/assets" >>~/.bashrc
 echo "export SIM_REPO_ROOT=/root/workspace/main" >>~/.bashrc
 
-echo "export ROS_DISTRO=humble" >>~/.bashrc
-echo "export ROS_LOCALHOST_ONLY=1" >>~/.bashrc
+echo "export ROS_DISTRO=jazzy" >>~/.bashrc
+echo "export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST" >>~/.bashrc
 
 # you can add more customized cmds here
 
 # setup ros2 environment
-source "/opt/ros/$ROS_DISTRO/setup.bash" --
+source "/isaac-sim/${ROS_DISTRO}_ws/install/setup.bash" --
 # exec "$@"
 
 #

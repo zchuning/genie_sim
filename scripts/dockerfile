@@ -1,7 +1,7 @@
 # HOWTO use this
 # $ docker build -f ./scripts/dockerfile -t registry.agibot.com/genie-sim/open_source:latest .
 
-FROM nvcr.io/nvidia/isaac-sim:4.5.0
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
 ENV ACCEPT_EULA=Y
 ENV PRIVACY_CONSENT=Y
@@ -13,56 +13,250 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     libeigen3-dev \
-    netcat \
+    netcat-openbsd \
     ffmpeg \
     bash \
     jq \
-    vim
+    vim \
+    curl \
+    wget
 
-
-# install ros2 humble
 # setup timezone
+# TODO: try removing the first two lines if not needed
 RUN echo 'Etc/UTC' > /etc/timezone && \
-    ln -s /usr/share/zoneinfo/Etc/UTC /etc/localtime && \
+    ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime && \
     apt-get update && \
-    apt-get install -q -y --no-install-recommends tzdata locales software-properties-common curl && \
+    apt-get install -q -y --no-install-recommends tzdata locales software-properties-common && \
     rm -rf /var/lib/apt/lists/*
 
 RUN locale-gen en_US en_US.UTF-8 && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-
 ENV LANG=en_US.UTF-8
-
-RUN add-apt-repository universe && \
-    curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
 # install packages
 RUN apt-get update && apt-get -y upgrade && \
-    apt-get install -q -y --no-install-recommends \
-    ros-dev-tools \
-    ros-humble-ros-base \
-    ros-humble-image-transport \
-    ros-humble-image-transport-plugins \
-    ros-humble-compressed-image-transport \
-    console-data \
-    git-lfs \
-    python3-pip \
+    apt-get install -q -y --no-install-recommends console-data git-lfs \
     && rm -rf /var/lib/apt/lists/*
+
+# ===========================================================
+# beginning of ros2 jazzy install
+# ===========================================================
+
+ENV ROS_DISTRO=jazzy
+ENV ROS_ROOT=jazzy_ws
+ENV ROS_PYTHON_VERSION=3
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python3.11
+RUN apt update && \
+    apt install --no-install-recommends -y build-essential software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt install --no-install-recommends -y python3.11 python3.11-dev python3.11-distutils python3.11-venv
+
+# Set default Python3 to Python3.11
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Pip install stuff
+RUN curl -s https://bootstrap.pypa.io/get-pip.py -o get-pip.py && \
+    python3.11 get-pip.py --force-reinstall && \
+    rm get-pip.py
+
+# ros key
+RUN wget https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc && apt-key add ros.asc
+RUN sh -c 'echo "deb [arch=$(dpkg --print-architecture)] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/ros2-latest.list'
+
+# Additional dependencies needed for rosidl_generator_c
+RUN apt update && apt install -y \
+    pkg-config \
+    python3-yaml \
+    cmake-extras
+
+# Install Boost libraries needed for OMPL
+RUN apt update && apt install -y \
+    libboost-all-dev \
+    libboost-dev \
+    libboost-filesystem-dev \
+    libboost-program-options-dev \
+    libboost-system-dev \
+    libboost-thread-dev \
+    libboost-serialization-dev \
+    libboost-date-time-dev \
+    libboost-regex-dev \
+    libfmt-dev
+
+# Install dependencies for geometric_shapes and other packages
+RUN apt update && apt install -y \
+    libqhull-dev \
+    libassimp-dev \
+    liboctomap-dev \
+    libconsole-bridge-dev \
+    libfcl-dev
+
+# Install Eigen3 needed for OMPL and MoveIt
+RUN apt update && apt install -y \
+    libeigen3-dev \
+    libopencv-dev
+
+# Fix libbrotli dependency issue
+# RUN apt-get update && apt-get install -y libbrotli1=1.0.9-2build6 --allow-downgrades
+
+# Install X11 and graphics dependencies needed for OGRE (RViz)
+RUN apt update && apt install -y \
+    libx11-dev \
+    libxaw7-dev \
+    libxrandr-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
+    libglew-dev \
+    libgles2-mesa-dev \
+    libopengl-dev \
+    libfreetype-dev \
+    libfreetype6-dev \
+    libfontconfig1-dev \
+    libfmt-dev
+
+# Install Qt5 and additional dependencies for RViz
+RUN apt update && apt install -y \
+    qtbase5-dev \
+    qtchooser \
+    qt5-qmake \
+    qtbase5-dev-tools \
+    libqt5core5a \
+    libqt5gui5 \
+    libqt5opengl5 \
+    libqt5widgets5 \
+    libxcursor-dev \
+    libxinerama-dev \
+    libxi-dev \
+    libyaml-cpp-dev \
+    libassimp-dev \
+    libzzip-dev \
+    freeglut3-dev \
+    libogre-1.9-dev \
+    libpng-dev \
+    libjpeg-dev \
+    python3-pyqt5.qtwebengine
+
+RUN python3.11 -m pip install setuptools==70.0.0
+
+RUN apt update && apt install -y \
+  python3-pip \
+  python3-pytest-cov \
+  python3-rosinstall-generator \
+  ros-dev-tools \
+  libbullet-dev \
+  libasio-dev \
+  libtinyxml2-dev \
+  libcunit1-dev \
+  libacl1-dev \
+  python3-empy \
+  libpython3-dev \
+  liblttng-ust-dev
+
+# Install the correct version of empy that is compatible with ROS 2 jazzy
+# Uninstall any existing empy first, then install version 3.3.4 specifically
+RUN python3.11 -m pip uninstall -y em empy || true
+RUN python3.11 -m pip install empy==3.3.4
+
+RUN python3.11 -m pip install -U --ignore-installed \
+  argcomplete \
+  flake8-blind-except \
+  flake8-builtins \
+  flake8-class-newline \
+  flake8-comprehensions \
+  flake8-deprecated \
+  flake8-docstrings \
+  flake8-import-order \
+  flake8-quotes \
+  pytest-repeat \
+  pytest-rerunfailures \
+  pytest \
+  lark
+
+RUN python3.11 -m pip uninstall numpy -y
+RUN python3.11 -m pip install --ignore-installed --upgrade pip
+RUN python3.11 -m pip install --ignore-installed numpy pybind11 PyYAML
+
+# Create symlinks for Python3.11 headers where CMake can find them
+RUN ln -sf /usr/include/python3.11 /usr/include/python3
+
+# Fix paths for pybind11
+RUN python3.11 -m pip install --ignore-installed "pybind11[global]"
+
+# Build Boost 1.87.0 from source for Python 3.11
+# This is required to install cv_bridge
+RUN cd /tmp && \
+    wget --no-check-certificate https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2 -O boost_1_87_0.tar.bz2 && \
+    tar -xjf boost_1_87_0.tar.bz2 && \
+    cd boost_1_87_0 && \
+    ./bootstrap.sh --with-python=/usr/bin/python3.11 && \
+    ./b2 -j$(nproc) install --prefix=/usr/local \
+    --with-python \
+    --with-filesystem \
+    --with-system \
+    --with-program_options \
+    --with-thread \
+    --with-serialization \
+    --with-date_time \
+    --with-regex \
+    --with-iostreams \
+    --with-chrono \
+    --with-atomic \
+    && \
+    ldconfig && \
+    cd .. && rm -rf boost_1_87_0 boost_1_87_0.tar.bz2 && \
+    rm -rf /usr/lib/x86_64-linux-gnu/cmake/Boost-1.74.0 /usr/lib/x86_64-linux-gnu/cmake/boost_python-1.74.0
+
+RUN mkdir -p ${ROS_ROOT}/src && \
+    cd ${ROS_ROOT} && \
+    rosinstall_generator --deps --rosdistro ${ROS_DISTRO} rosidl_runtime_c rcutils rcl rmw tf2 tf2_msgs common_interfaces geometry_msgs nav_msgs std_msgs rosgraph_msgs sensor_msgs vision_msgs rclpy ros2topic ros2pkg ros2doctor ros2run ros2node ros_environment ackermann_msgs example_interfaces cv_bridge > ros2.${ROS_DISTRO}.${ROS_PKG}.rosinstall && \
+    cat ros2.${ROS_DISTRO}.${ROS_PKG}.rosinstall && \
+    vcs import src < ros2.${ROS_DISTRO}.${ROS_PKG}.rosinstall
+
+# Patch rclpy to ensure it builds with Python 3.11 - find the correct path first
+RUN find /workspace/${ROS_ROOT}/src -name rclpy -type d | xargs -I{} /bin/bash -c 'if [ -f {}/CMakeLists.txt ]; then \
+    echo "Patching {}/CMakeLists.txt"; \
+    sed -i "s/include_directories(\${PYTHON_INCLUDE_DIRS})/include_directories(\/usr\/include\/python3.11)/" {}/CMakeLists.txt; \
+    sed -i "s/\${PYTHON_LIBRARY}/python3.11/" {}/CMakeLists.txt; \
+    fi'
+
+RUN rosdep init && rosdep update
+
+# Make sure PYTHONPATH includes the correct site-packages
+ENV PYTHONPATH=/usr/local/lib/python3.11/dist-packages
+
+# Use logging to help debug build issues
+RUN cd ${ROS_ROOT} && colcon build --cmake-args \
+    "-DPython3_EXECUTABLE=/usr/bin/python3.11" \
+    "-DPYTHON_EXECUTABLE=/usr/bin/python3.11" \
+    "-DPYTHON_INCLUDE_DIR=/usr/include/python3.11" \
+    "-DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.11.so" \
+    --merge-install
+
+# Need these to maintain compatibility on non 20.04 systems
+RUN cp /usr/lib/x86_64-linux-gnu/libtinyxml2.so* /workspace/jazzy_ws/install/lib/ || true
+RUN cp /usr/lib/x86_64-linux-gnu/libssl.so* /workspace/jazzy_ws/install/lib/ || true
+RUN cp /usr/lib/x86_64-linux-gnu/libcrypto.so* /workspace/jazzy_ws/install/lib/ || true
+
+# ===========================================================
+# end of ros2 jazzy install
+# ===========================================================
 
 # pip install benchmark deps
 COPY ./requirements.txt /tmp
-RUN /isaac-sim/kit/python/bin/python3 -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
-RUN /isaac-sim/python.sh -m pip install -r /tmp/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-RUN /isaac-sim/python.sh -m pip install tomli wheel ninja -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN /isaac-sim/python.sh -m pip install --upgrade pip
+RUN /isaac-sim/python.sh -m pip install -r /tmp/requirements.txt
+RUN /isaac-sim/python.sh -m pip install tomli wheel ninja
 
 # pip install infer deps
 COPY ./requirements_infer.txt /tmp
-RUN pip3 install -r /tmp/requirements_infer.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN python3.11 -m pip install --ignore-installed -r /tmp/requirements_infer.txt
 
 # update torch for both system python and issac-sim python
-RUN python3 -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu130
+RUN python3.11 -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu130
 RUN /isaac-sim/python.sh -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu130
 
+# update this specific dependency because the bundled one assumes cuda 12.8
+RUN /isaac-sim/python.sh -m pip install --upgrade nvidia-nvjitlink-cu12 
 
 # pip install curobo [default to option1]
 # OPTION 1: install from source, which can be slow, please refer to https://curobo.org/get_started/1_install_instructions.html
@@ -72,38 +266,40 @@ RUN dpkg -i /tmp/cuda-keyring_1.0-1_all.deb
 RUN apt-get update
 RUN apt-get -y install cuda-toolkit-13-0
 
-# uninstall cuda 11
-RUN /isaac-sim/python.sh -m pip uninstall -y nvidia-cuda-cupti-cu11 nvidia-cuda-nvrtc-cu11 nvidia-cuda-runtime-cu11
-
 # NOTICE!!! Default to RTX4090D that we use, do remember to change TORCH_CUDA_ARCH_LIST for your GPU model, see https://github.com/AgibotTech/genie_sim/issues/4
 ENV CUDA_HOME="/usr/local/cuda-13.0"
 ENV TORCH_CUDA_ARCH_LIST="12.0"
-RUN cd /tmp/curobo && /isaac-sim/python.sh -m pip install --no-build-isolation .[isaacsim] -i https://pypi.tuna.tsinghua.edu.cn/simple
+RUN cd /tmp/curobo && /isaac-sim/python.sh -m pip install --no-build-isolation .[isaacsim]
 
-# OPTION 2: install from pre-built wheel, if you have already built curobo
-# COPY 3rdparty/nvidia_curobo-0.7.6-cp310-cp310-linux_x86_64.whl /tmp
-# RUN /isaac-sim/python.sh -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-#     /tmp/nvidia_curobo-0.7.6-cp310-cp310-linux_x86_64.whl
+# # OPTION 2: install from pre-built wheel, if you have already built curobo
+# # COPY 3rdparty/nvidia_curobo-0.7.6-cp310-cp310-linux_x86_64.whl /tmp
+# # RUN /isaac-sim/python.sh -m pip install \
+# #     /tmp/nvidia_curobo-0.7.6-cp310-cp310-linux_x86_64.whl
 
-# copy curobo genie robot config
-COPY source/geniesim/app/robot_cfg \
-    /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/assets/robot
-COPY source/geniesim/app/curobo/configs/robot/G1_omnipicker.yml \
-    /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/configs/robot
-COPY source/geniesim/app/robot_cfg/G1_120s/G1_120s.yml \
-    /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/configs/robot
+# # copy curobo genie robot config
+# COPY source/geniesim/app/robot_cfg \
+#     /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/assets/robot
+# COPY source/geniesim/app/curobo/configs/robot/G1_omnipicker.yml \
+#     /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/configs/robot
+# COPY source/geniesim/app/robot_cfg/G1_120s/G1_120s.yml \
+#     /isaac-sim/kit/python/lib/python3.10/site-packages/curobo/content/configs/robot
 
-# pip install ik_solver
-COPY 3rdparty/ik_solver-0.4.3-cp310-cp310-linux_x86_64.whl /tmp
-RUN /isaac-sim/python.sh -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    /tmp/ik_solver-0.4.3-cp310-cp310-linux_x86_64.whl
+# # pip install ik_solver
+# COPY 3rdparty/ik_solver-0.4.3-cp310-cp310-linux_x86_64.whl /tmp
+# RUN /isaac-sim/python.sh -m pip install \
+#     /tmp/ik_solver-0.4.3-cp310-cp310-linux_x86_64.whl
 
-COPY 3rdparty/ik_solver-0.3.0-cp310-cp310-linux_x86_64.whl /tmp
-RUN python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    /tmp/ik_solver-0.3.0-cp310-cp310-linux_x86_64.whl
+# COPY 3rdparty/ik_solver-0.3.0-cp310-cp310-linux_x86_64.whl /tmp
+# RUN python3 -m pip install \
+#     /tmp/ik_solver-0.3.0-cp310-cp310-linux_x86_64.whl
 
 # COPY 3rdparty/flash_attn-2.8.2+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl /tmp
-# RUN python3 -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+# RUN python3 -m pip install \
 #     /tmp/flash_attn-2.8.2+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+
+# Fix for Isaac Sim ROS 2 Bridge when using custom ROS 2 Jazzy
+# Force the bridge to use its internal Humble libraries
+ENV RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib
 
 CMD ["bash"]
