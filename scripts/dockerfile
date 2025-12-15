@@ -272,4 +272,9 @@ RUN cd /tmp/curobo && /isaac-sim/python.sh -m pip install --no-build-isolation .
 # RUN python3 -m pip install \
 #     /tmp/flash_attn-2.8.2+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 
+# Install openpi client
+RUN git clone https://github.com/Physical-Intelligence/openpi.git /tmp/openpi
+RUN cd /tmp/openpi/packages/openpi_client
+RUN python3.11 -m pip install -e .
+
 CMD ["bash"]
