@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -83,8 +84,8 @@ def infer(policy, cfg):
             if sim_time > SIM_INIT_TIME:
                 print("cur sim time", sim_time, img_h_raw.header.stamp)
 
-                # Save images and states at an interval
-                if init_frame or frame_idx == subsample_interval:
+                # Save images at an interval
+                if init_frame or frame_idx % subsample_interval == 0:
                     img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="rgb8")
                     img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="rgb8")
                     img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="rgb8")
@@ -92,62 +93,59 @@ def infer(policy, cfg):
                     img_l = resize_rgb(img_l, *cfg["resize_shape"])
                     img_r = resize_rgb(img_r, *cfg["resize_shape"])
                     image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
-
-                    if frame_idx == subsample_interval:
-                        frame_idx = 0
                 
-                    state = np.array(act_raw.position).astype(np.float64)
-                    state_buffer.append(state)
+                # Save latest state
+                state = np.array(act_raw.position).astype(np.float64)
+                state_buffer.append(state)
 
-                frame_idx += 1
+            if action_queue:
+                is_end = True if len(action_queue) == 1 else False
+                sim_ros_node.publish_joint_command(action_queue.popleft(), is_end)
+                frame_idx += 1 # increment only when action is taken
+            else:
+                infer_start = sim_ros_node.is_infer_start()
+                if (
+                    (init_frame or infer_start) 
+                    and len(state_buffer) > 0
+                    and len(image_buffer) > 0
+                ):
+                    img_h_seq = np.stack([f["img_h"] for f in image_buffer])
+                    img_l_seq = np.stack([f["img_l"] for f in image_buffer])
+                    img_r_seq = np.stack([f["img_r"] for f in image_buffer])
 
-        if action_queue:
-            is_end = True if len(action_queue) == 1 else False
-            sim_ros_node.publish_joint_command(action_queue.popleft(), is_end)
-        else:
-            infer_start = sim_ros_node.is_infer_start()
-            if (
-                (init_frame or infer_start) 
-                and len(state_buffer) > 0
-                and len(image_buffer) > 0
-            ):
-                img_h_seq = np.stack([f["img_h"] for f in image_buffer])
-                img_l_seq = np.stack([f["img_l"] for f in image_buffer])
-                img_r_seq = np.stack([f["img_r"] for f in image_buffer])
+                    # State remap: sim JointState is
+                    #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
+                    # Server expects:
+                    #   left_arm(7), right_arm(7), left_effector(1), right_effector(1), head_position(2), waist_pitch(1), waist_lift(1)
+                    states = np.stack(state_buffer)
+                    left_arm = states[:, 0:7]
+                    left_eff = states[:, 7:8]
+                    right_arm = states[:, 8:15]
+                    right_eff = states[:, 15:16]
+                    waist_pitch = states[:, 16:17]
+                    waist_lift = states[:, 17:18]
+                    head_pos = states[:, 18:20]
 
-                # State remap: sim JointState is
-                #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
-                # Server expects:
-                #   left_arm(7), right_arm(7), left_effector(1), right_effector(1), head_position(2), waist_pitch(1), waist_lift(1)
-                states = np.stack(state_buffer)
-                left_arm = states[:, 0:7]
-                left_eff = states[:, 7:8]
-                right_arm = states[:, 8:15]
-                right_eff = states[:, 15:16]
-                waist_pitch = states[:, 16:17]
-                waist_lift = states[:, 17:18]
-                head_pos = states[:, 18:20]
+                    obs = {
+                        "video.top_head": img_h_seq,
+                        "video.hand_left": img_l_seq,
+                        "video.hand_right": img_r_seq,
+                        "state.left_arm_joint_position": left_arm,
+                        "state.right_arm_joint_position": right_arm,
+                        "state.left_effector_position": left_eff,
+                        "state.right_effector_position": right_eff,
+                        "state.head_position": head_pos,
+                        "state.waist_pitch": waist_pitch,
+                        "state.waist_lift": waist_lift,
+                        "annotation.language.action_text": instruction,
+                    }
 
-                obs = {
-                    "video.top_head": img_h_seq,
-                    "video.hand_left": img_l_seq,
-                    "video.hand_right": img_r_seq,
-                    "state.left_arm_joint_position": left_arm,
-                    "state.right_arm_joint_position": right_arm,
-                    "state.left_effector_position": left_eff,
-                    "state.right_effector_position": right_eff,
-                    "state.head_position": head_pos,
-                    "state.waist_pitch": waist_pitch,
-                    "state.waist_lift": waist_lift,
-                    "annotation.language.action_text": instruction,
-                }
+                    # print all observation shapes
+                    for key, value in obs.items():
+                        print(f"obs[{key}]: {value.shape if isinstance(value, np.ndarray) else type(value)}")
 
-                # print all observation shapes
-                for key, value in obs.items():
-                    print(f"obs[{key}]: {value.shape if isinstance(value, np.ndarray) else type(value)}")
-
-                action_queue = policy.step(obs)
-                init_frame = False
+                    action_queue = policy.step(obs)
+                    init_frame = False
 
 
         sim_ros_node.loop_rate.sleep()
@@ -169,11 +167,13 @@ class RemotePolicyClient:
         connect_timeout_s: float = 10.0,
         request_timeout_s: float = 60.0,
         verbose: bool = True,
+        video_path: str = "",
     ):
         self._uri = uri
         self._connect_timeout_s = float(connect_timeout_s)
         self._request_timeout_s = float(request_timeout_s)
         self._verbose = bool(verbose)
+        self._video_path = video_path
 
         self._loop = None
         self._thread = None
@@ -197,9 +197,8 @@ class RemotePolicyClient:
             _, height, width, _ = self.recorded_frames[0].shape
             
             # Write video with cv2
-            filename = "debug_obs.mp4"
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video = cv2.VideoWriter(filename, fourcc, 15.0, (width, height))
+            video = cv2.VideoWriter(self._video_path, fourcc, 15.0, (width, height))
             recorded_frames = np.concatenate(self.recorded_frames, axis=0)
             for frame in recorded_frames:
                 video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
@@ -333,11 +332,12 @@ if __name__ == "__main__":
         connect_timeout_s=args.connect_timeout,
         request_timeout_s=args.request_timeout,
         verbose=not args.quiet,
+        video_path=f"videos/{args.task_name}_{datetime.now().strftime('%H-%M-%S')}.mp4",
     )
 
     cfg = {
         "history_len": 48,
-        "num_subsample_frames": 4,
+        "num_subsample_frames": 8,
         "resize_shape": (480, 640),
         "task_name": args.task_name,
     }
