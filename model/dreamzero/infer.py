@@ -2,240 +2,31 @@
 # Author: Genie Sim Team
 # License: Mozilla Public License Version 2.0
 
+import asyncio
+import atexit
+import os
 import sys
+import threading
+from collections import deque
 from pathlib import Path
 
-import asyncio
-
 sys.path.append(str(Path(__file__).parent.parent))
-import rclpy
-import threading
-from cv_bridge import CvBridge
-import numpy as np
 
 import cv2
-
+import rclpy
+import numpy as np
+import torch
 import websockets
+from cv_bridge import CvBridge
 from openpi_client import msgpack_numpy
 
-from rclpy.qos import (
-    QoSProfile,
-    QoSHistoryPolicy,
-    QoSReliabilityPolicy,
-    QoSDurabilityPolicy,
-)
-from rclpy.node import Node
-from rclpy.parameter import Parameter
+from genie_sim_ros import SimROSNode
+from instructions import get_instruction
 
-from sensor_msgs.msg import (
-    CompressedImage,
-    JointState,
-)
-from std_msgs.msg import Bool
-from collections import deque
-import torch
-
-QOS_PROFILE_LATEST = QoSProfile(
-    history=QoSHistoryPolicy.KEEP_LAST,
-    depth=30,
-    reliability=QoSReliabilityPolicy.RELIABLE,
-    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-)
 
 def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
-
-
-class SimROSNode(Node):
-    def __init__(self, node_name="univla_node"):
-        super().__init__(
-            node_name,
-            parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
-        )
-
-        # publish
-        self.pub_joint_command = self.create_publisher(
-            JointState,
-            "/sim/target_joint_state",
-            QOS_PROFILE_LATEST,
-        )
-
-        # subscribe
-        self.sub_img_head = self.create_subscription(
-            CompressedImage,
-            "/sim/head_img",
-            self.callback_rgb_image_head,
-            1,
-        )
-
-        self.sub_img_left_wrist = self.create_subscription(
-            CompressedImage,
-            "/sim/left_wrist_img",
-            self.callback_rgb_image_left_wrist,
-            1,
-        )
-
-        self.sub_img_right_wrist = self.create_subscription(
-            CompressedImage,
-            "/sim/right_wrist_img",
-            self.callback_rgb_image_right_wrist,
-            1,
-        )
-
-        self.sub_js = self.create_subscription(
-            JointState,
-            "/joint_states",
-            self.callback_joint_state,
-            1,
-        )
-
-        self.sub_infer_start = self.create_subscription(
-            Bool,
-            "/sim/infer_start",
-            self.callback_infer_start,
-            1,
-        )
-
-        # msg
-        self.lock_img_head = threading.Lock()
-        self.lock_img_left_wrist = threading.Lock()
-        self.lock_img_right_wrist = threading.Lock()
-
-        self.message_buffer = deque(maxlen=30)
-        self.lock_joint_state = threading.Lock()
-        self.obs_joint_state = JointState()
-        self.cur_joint_state = JointState()
-        self.infer_start = False
-
-        # loop
-        self.loop_rate = self.create_rate(30.0)
-
-        self.img_head = None
-        self.img_left_wrist = None
-        self.img_right_wrist = None
-
-    def callback_rgb_image_head(self, msg):
-        # print(msg.header)
-        with self.lock_img_head:
-            self.img_head = msg
-
-    def callback_rgb_image_left_wrist(self, msg):
-        # print(msg.header)
-        with self.lock_img_left_wrist:
-            self.img_left_wrist = msg
-
-    def callback_rgb_image_right_wrist(self, msg):
-        # print(msg.header)
-        with self.lock_img_right_wrist:
-            self.img_right_wrist = msg
-
-    def get_img_head(self):
-        with self.lock_img_head:
-            return self.img_head
-
-    def get_img_left_wrist(self):
-        with self.lock_img_left_wrist:
-            return self.img_left_wrist
-
-    def get_img_right_wrist(self):
-        with self.lock_img_right_wrist:
-            return self.img_right_wrist
-
-    def publish_joint_command(self, action, is_end=False):
-        cmd_msg = JointState()
-        if is_end:
-            cmd_msg.header.frame_id = "-1"
-
-        cmd_msg.name = [
-            "idx21_arm_l_joint1",
-            "idx22_arm_l_joint2",
-            "idx23_arm_l_joint3",
-            "idx24_arm_l_joint4",
-            "idx25_arm_l_joint5",
-            "idx26_arm_l_joint6",
-            "idx27_arm_l_joint7",
-            "idx41_gripper_l_outer_joint1",
-            "idx61_arm_r_joint1",
-            "idx62_arm_r_joint2",
-            "idx63_arm_r_joint3",
-            "idx64_arm_r_joint4",
-            "idx65_arm_r_joint5",
-            "idx66_arm_r_joint6",
-            "idx67_arm_r_joint7",
-            "idx81_gripper_r_outer_joint1",
-        ]
-        cmd_msg.position = [0.0] * len(cmd_msg.name)
-        cmd_msg.position[0] = action[0]
-        cmd_msg.position[1] = action[1]
-        cmd_msg.position[2] = action[2]
-        cmd_msg.position[3] = action[3]
-        cmd_msg.position[4] = action[4]
-        cmd_msg.position[5] = action[5]
-        cmd_msg.position[6] = action[6]
-        cmd_msg.position[7] = np.clip((1 - action[7]), 0, 1)
-        cmd_msg.position[8] = action[8]
-        cmd_msg.position[9] = action[9]
-        cmd_msg.position[10] = action[10]
-        cmd_msg.position[11] = action[11]
-        cmd_msg.position[12] = action[12]
-        cmd_msg.position[13] = action[13]
-        cmd_msg.position[14] = action[14]
-        cmd_msg.position[15] = np.clip((1 - action[15]), 0, 1)
-
-        self.pub_joint_command.publish(cmd_msg)
-
-    def callback_joint_state(self, msg):
-        # print(msg.header)
-        self.cur_joint_state = msg
-
-        joint_name_state_dict = {}
-        for idx, name in enumerate(msg.name):
-            joint_name_state_dict[name] = msg.position[idx]
-
-        msg_remap = JointState()
-        msg_remap.header = msg.header
-        msg_remap.name = []
-        msg_remap.velocity = []
-        msg_remap.effort = []
-        msg_remap.position.append(joint_name_state_dict["idx21_arm_l_joint1"])
-        msg_remap.position.append(joint_name_state_dict["idx22_arm_l_joint2"])
-        msg_remap.position.append(joint_name_state_dict["idx23_arm_l_joint3"])
-        msg_remap.position.append(joint_name_state_dict["idx24_arm_l_joint4"])
-        msg_remap.position.append(joint_name_state_dict["idx25_arm_l_joint5"])
-        msg_remap.position.append(joint_name_state_dict["idx26_arm_l_joint6"])
-        msg_remap.position.append(joint_name_state_dict["idx27_arm_l_joint7"])
-        left_gripper_pos = min(1, max(0.0, (0.8 - (joint_name_state_dict["idx41_gripper_l_outer_joint1"]))))
-        msg_remap.position.append(left_gripper_pos)
-
-        msg_remap.position.append(joint_name_state_dict["idx61_arm_r_joint1"])
-        msg_remap.position.append(joint_name_state_dict["idx62_arm_r_joint2"])
-        msg_remap.position.append(joint_name_state_dict["idx63_arm_r_joint3"])
-        msg_remap.position.append(joint_name_state_dict["idx64_arm_r_joint4"])
-        msg_remap.position.append(joint_name_state_dict["idx65_arm_r_joint5"])
-        msg_remap.position.append(joint_name_state_dict["idx66_arm_r_joint6"])
-        msg_remap.position.append(joint_name_state_dict["idx67_arm_r_joint7"])
-        right_gripper_pos = min(1, max(0.0, (0.8 - (joint_name_state_dict["idx81_gripper_r_outer_joint1"]))))
-        msg_remap.position.append(right_gripper_pos)
-
-        msg_remap.position.append(joint_name_state_dict["idx01_body_joint1"])
-        msg_remap.position.append(joint_name_state_dict["idx02_body_joint2"])
-        msg_remap.position.append(joint_name_state_dict["idx11_head_joint1"])
-        msg_remap.position.append(joint_name_state_dict["idx12_head_joint2"])
-
-
-        with self.lock_joint_state:
-            self.obs_joint_state = msg_remap
-
-    def get_joint_state(self):
-        with self.lock_joint_state:
-            return self.obs_joint_state
-
-    def callback_infer_start(self, msg):
-        self.infer_start = msg.data
-
-    def is_infer_start(self):
-        return self.infer_start
 
 
 def get_sim_time(sim_ros_node):
@@ -352,9 +143,9 @@ def infer(policy, cfg):
         sim_ros_node.loop_rate.sleep()
 
 class RemotePolicyClient:
-    """Thin client that queries a remote websocket policy server.
+    """Policy client that queries a remote websocket policy server.
 
-    Protocol matches test_client.py:
+    Protocol:
     - Connect to ws://host:port
     - Server sends a metadata msgpack message on connect
     - Client sends msgpack-packed observation dict
@@ -381,8 +172,34 @@ class RemotePolicyClient:
         self._connected = threading.Event()
         self._lock = threading.Lock()
 
+        self.recorded_frames = []
+        atexit.register(self.save_video)
+
         self._start_loop_thread()
         self._ensure_connected_sync()
+
+    def save_video(self):
+        if not self.recorded_frames:
+            return
+        
+        print(f"[RemotePolicyClient] Saving debug video with {len(self.recorded_frames)} frames...")
+        try:
+            # Frames are concatenated (H, W*3, C) RGB
+            height, width, _ = self.recorded_frames[0].shape
+            # Use a filename that won't be overwritten easily or just a fixed one
+            filename = "debug_obs.mp4"
+            
+            # cv2 VideoWriter expects BGR
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video = cv2.VideoWriter(filename, fourcc, 30.0, (width, height))
+            
+            for frame in self.recorded_frames:
+                video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            
+            video.release()
+            print(f"[RemotePolicyClient] Saved {filename}")
+        except Exception as e:
+            print(f"[RemotePolicyClient] Failed to save video: {e}")
 
     def _start_loop_thread(self):
         loop = asyncio.new_event_loop()
@@ -427,103 +244,6 @@ class RemotePolicyClient:
         fut = asyncio.run_coroutine_threadsafe(self._connect_async(), self._loop)
         fut.result(timeout=self._connect_timeout_s + 5.0)
 
-    @staticmethod
-    def _dict_actions_to_joint_sequence(action_payload: dict) -> np.ndarray:
-        """Convert a server action dict into a (T,16) joint action sequence.
-
-        Supports payloads like:
-          - {"action.left_arm_joint_position": (T,7), ...}
-          - {"action": {"left_arm_joint_position": (T,7), ...}}
-
-        Output ordering matches publish_joint_command():
-          [left_arm(7), left_eff(1), right_arm(7), right_eff(1)]
-        """
-
-        # Normalize to flat keys "action.*"
-        flat: dict[str, object] = {}
-        for k, v in action_payload.items():
-            if k.startswith("action."):
-                flat[k] = v
-
-        nested = action_payload.get("action")
-        if isinstance(nested, dict):
-            for k, v in nested.items():
-                kk = k if k.startswith("action.") else f"action.{k}"
-                flat[kk] = v
-
-        required = (
-            "action.left_arm_joint_position",
-            "action.right_arm_joint_position",
-            "action.left_effector_position",
-            "action.right_effector_position",
-        )
-        missing = [k for k in required if k not in flat]
-        if missing:
-            raise ValueError(f"Missing required action keys: {missing}. Available keys: {sorted(flat.keys())}")
-
-        left_arm = np.asarray(flat["action.left_arm_joint_position"])
-        right_arm = np.asarray(flat["action.right_arm_joint_position"])
-        left_eff = np.asarray(flat["action.left_effector_position"])
-        right_eff = np.asarray(flat["action.right_effector_position"])
-
-        if left_arm.ndim != 2 or left_arm.shape[1] != 7:
-            raise ValueError(f"action.left_arm_joint_position must be (T,7), got {left_arm.shape}")
-        if right_arm.ndim != 2 or right_arm.shape[1] != 7:
-            raise ValueError(f"action.right_arm_joint_position must be (T,7), got {right_arm.shape}")
-
-        T = left_arm.shape[0]
-        if right_arm.shape[0] != T:
-            raise ValueError(
-                f"Mismatched time dimension: left_arm T={T}, right_arm T={right_arm.shape[0]}"
-            )
-
-        # Effector positions may arrive as (T,) or (T,1)
-        if left_eff.ndim == 1:
-            left_eff = left_eff.reshape(-1, 1)
-        if right_eff.ndim == 1:
-            right_eff = right_eff.reshape(-1, 1)
-
-        if left_eff.ndim != 2 or left_eff.shape[1] != 1:
-            raise ValueError(f"action.left_effector_position must be (T,) or (T,1), got {left_eff.shape}")
-        if right_eff.ndim != 2 or right_eff.shape[1] != 1:
-            raise ValueError(f"action.right_effector_position must be (T,) or (T,1), got {right_eff.shape}")
-        if left_eff.shape[0] != T or right_eff.shape[0] != T:
-            raise ValueError(
-                f"Mismatched time dimension: T={T}, left_eff T={left_eff.shape[0]}, right_eff T={right_eff.shape[0]}"
-            )
-
-        joint_seq = np.concatenate([left_arm, left_eff, right_arm, right_eff], axis=1).astype(np.float64, copy=False)
-        return joint_seq
-
-    @staticmethod
-    def _extract_action_array(action_payload):
-        """Extract an action array from multiple possible server payload formats."""
-        if isinstance(action_payload, np.ndarray):
-            return action_payload
-
-        if isinstance(action_payload, dict):
-            return RemotePolicyClient._dict_actions_to_joint_sequence(action_payload)
-
-        raise ValueError(f"Unsupported action payload type: {type(action_payload)}")
-
-    @staticmethod
-    def _to_action_queue(action_array: np.ndarray) -> deque:
-        arr = np.asarray(action_array)
-        arr = np.squeeze(arr)
-
-        # Accept shapes like (16,), (T,16), (1,T,16)
-        if arr.ndim == 1:
-            if arr.size != 16:
-                raise ValueError(f"Expected 16D action, got shape {arr.shape}")
-            return deque([arr.astype(np.float64, copy=False)])
-
-        if arr.ndim == 2:
-            if arr.shape[1] != 16:
-                raise ValueError(f"Expected (T,16) action sequence, got shape {arr.shape}")
-            return deque([arr[i].astype(np.float64, copy=False) for i in range(arr.shape[0])])
-
-        raise ValueError(f"Unsupported action array shape: {arr.shape}")
-
     async def _step_async(self, obs: dict):
         if self._ws is None:
             await self._connect_async()
@@ -538,45 +258,45 @@ class RemotePolicyClient:
         return msgpack_numpy.unpackb(action_raw)
 
     def step(self, obs: dict) -> deque:
-        # Prevent concurrent send/recv on one websocket.
+        # Record observation for debugging
+        try:
+            # Extract latest frames (assuming shape T,H,W,C)
+            img_h = obs["video.top_head"][-1]
+            img_l = obs["video.hand_left"][-1]
+            img_r = obs["video.hand_right"][-1]
+            
+            # Concatenate horizontally: Left Wrist | Head | Right Wrist
+            combined = np.concatenate([img_l, img_h, img_r], axis=1)
+            self.recorded_frames.append(combined)
+        except Exception:
+            pass
+
         with self._lock:
             try:
                 fut = asyncio.run_coroutine_threadsafe(self._step_async(obs), self._loop)
                 payload = fut.result(timeout=self._request_timeout_s + 5.0)
             except Exception:
-                # Attempt one reconnect + retry.
                 self._ensure_connected_sync()
                 fut = asyncio.run_coroutine_threadsafe(self._step_async(obs), self._loop)
                 payload = fut.result(timeout=self._request_timeout_s + 5.0)
 
-        action_array = self._extract_action_array(payload)
-        return self._to_action_queue(action_array)
+        # Simplified action processing
+        # Assume payload is a dict with the correct keys
+        left_arm = np.asarray(payload["action.left_arm_joint_position"])
+        right_arm = np.asarray(payload["action.right_arm_joint_position"])
+        left_eff = np.asarray(payload["action.left_effector_position"])
+        right_eff = np.asarray(payload["action.right_effector_position"])
 
+        # Ensure 2D shapes (T, D)
+        if left_eff.ndim == 1: 
+            left_eff = left_eff[:, None]
+        if right_eff.ndim == 1: 
+            right_eff = right_eff[:, None]
 
-def get_instruction(task_name):
-    if task_name == "iros_clear_the_countertop_waste":
-        lang = "Pick up the yellow functional beverage can on the table with the left arm.;Threw the yellow functional beverage can into the trash can with the left arm.;Pick up the green carbonated beverage can on the table with the right arm.;Threw the green carbonated beverage can into the trash can with the right arm."
-    elif task_name == "iros_restock_supermarket_items":
-        lang = "Pick up the brown plum juice from the restock box with the right arm.;Place the brown plum juice on the shelf where the brown plum juice is located with the right arm."
-    elif task_name == "iros_clear_table_in_the_restaurant":
-        lang = "Pick up the bowl on the table near the right arm with the right arm.;Place the bowl on the plate on the table with the right arm."
-    elif task_name == "iros_stamp_the_seal":
-        lang = "Pick up the stamp from the ink pad on the table with the right arm.;Stamp the document on the table with the stamp in the right arm.;Place the stamp into the ink pad on the table with the right arm."
-    elif task_name == "iros_pack_in_the_supermarket":
-        lang = "Pick up the grape juice on the table with the right arm.;Put the grape juice into the felt bag on the table with the right arm."
-    elif task_name == "iros_heat_the_food_in_the_microwave":
-        lang = "Open the door of the microwave oven with the right arm.;Pick up the plate with bread on the table with the right arm.;Put the plate containing bread into the microwave oven with the right arm.;Push the plate that was not placed properly into the microwave oven the right arm.;Close the door of the microwave oven with the left arm.;Press the start button on the right side of the microwave oven with the right arm."
-    elif task_name == "iros_open_drawer_and_store_items":
-        lang = "Pull the top drawer of the drawer cabinet with the right arm.;Pick up the Rubik's Cube on the drawer cabinet with the right arm.;Place the Rubik's Cube into the drawer with the right arm.;Push the top drawer of the drawer cabinet with the right arm."
-    elif task_name == "iros_pack_moving_objects_from_conveyor":
-        lang = "Pick up the hand cream from the conveyor belt with the right arm;Place the hand cream held in the right arm into the box on the table"
-    elif task_name == "iros_pickup_items_from_the_freezer":
-        lang = "Open the freezer door with the right arm;Pick up the caviar from the freezer with the right arm;Place the caviar held in the right arm into the shopping cart;Close the freezer door with both arms"
-    elif task_name == "iros_make_a_sandwich":
-        lang = "Pick up the bread slice from the toaster on the table with the right arm;Place the picked bread slice into the plate on the table with the right arm;Pick up the ham slice from the box on the table with the left arm;Place the picked ham slice onto the bread slice in the plate on the table with the left arm;Pick up the lettuce slice from the box on the table with the right arm;Place the picked lettuce slice onto the ham slice in the plate on the table with the right arm;Pick up the bread slice from the toaster on the table with the right arm;Place the bread slice onto the lettuce slice in the plate on the table with the right arm"
-    else:
-        raise ValueError("task does not exist")
-    return lang
+        # Concatenate: [left_arm(7), left_eff(1), right_arm(7), right_eff(1)]
+        joint_seq = np.concatenate([left_arm, left_eff, right_arm, right_eff], axis=1)
+        
+        return deque([step.astype(np.float64) for step in joint_seq])
 
 
 if __name__ == "__main__":
