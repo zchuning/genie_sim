@@ -51,93 +51,103 @@ def infer(policy, cfg):
     sim_ros_node = SimROSNode()
     spin_thread = threading.Thread(target=rclpy.spin, args=(sim_ros_node,))
     spin_thread.start()
-    init_frame = True
     bridge = CvBridge()
-    count = 0
     SIM_INIT_TIME = 10
     action_queue = None
-    instruction = (cfg or {}).get("instruction")
-    target_h, target_w = 480, 640
+    instruction = get_instruction(cfg["task_name"])
+
+    # Buffers: keep dense states and subsampled images
+    history_len = cfg["history_len"] 
+    num_subsample_frames = cfg["num_subsample_frames"]
+    subsample_interval = history_len // num_subsample_frames
+
+    state_buffer = deque(maxlen=1)
+    image_buffer = deque(maxlen=num_subsample_frames)
+    frame_idx = 0
+    init_frame = True
 
     while rclpy.ok():
+        img_h_raw = sim_ros_node.get_img_head()
+        img_l_raw = sim_ros_node.get_img_left_wrist()
+        img_r_raw = sim_ros_node.get_img_right_wrist()
+        act_raw = sim_ros_node.get_joint_state()
+
+        if ( 
+            img_h_raw
+            and img_l_raw
+            and img_r_raw
+            and act_raw
+            and img_h_raw.header.stamp == img_l_raw.header.stamp == img_r_raw.header.stamp
+        ):
+            sim_time = get_sim_time(sim_ros_node)
+            if sim_time > SIM_INIT_TIME:
+                print("cur sim time", sim_time, img_h_raw.header.stamp)
+
+                # Save images and states at an interval
+                if init_frame or frame_idx == subsample_interval:
+                    img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="rgb8")
+                    img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="rgb8")
+                    img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="rgb8")
+                    img_h = resize_rgb(img_h, *cfg["resize_shape"])
+                    img_l = resize_rgb(img_l, *cfg["resize_shape"])
+                    img_r = resize_rgb(img_r, *cfg["resize_shape"])
+                    image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
+
+                    if frame_idx == subsample_interval:
+                        frame_idx = 0
+                
+                    state = np.array(act_raw.position).astype(np.float64)
+                    state_buffer.append(state)
+
+                frame_idx += 1
+
         if action_queue:
             is_end = True if len(action_queue) == 1 else False
             sim_ros_node.publish_joint_command(action_queue.popleft(), is_end)
-
         else:
-            img_h_raw = sim_ros_node.get_img_head()
-            img_l_raw = sim_ros_node.get_img_left_wrist()
-            img_r_raw = sim_ros_node.get_img_right_wrist()
-            act_raw = sim_ros_node.get_joint_state()
             infer_start = sim_ros_node.is_infer_start()
-
-            if (init_frame or infer_start) and (
-                img_h_raw
-                and img_l_raw
-                and img_r_raw
-                and act_raw
-                and img_h_raw.header.stamp
-                == img_l_raw.header.stamp
-                == img_r_raw.header.stamp
+            if (
+                (init_frame or infer_start) 
+                and len(state_buffer) > 0
+                and len(image_buffer) > 0
             ):
-                sim_time = get_sim_time(sim_ros_node)
-                if sim_time > SIM_INIT_TIME:
-                    init_frame = False
-                    count = count + 1
+                img_h_seq = np.stack([f["img_h"] for f in image_buffer])
+                img_l_seq = np.stack([f["img_l"] for f in image_buffer])
+                img_r_seq = np.stack([f["img_r"] for f in image_buffer])
 
-                    img_h = bridge.compressed_imgmsg_to_cv2(
-                        img_h_raw, desired_encoding="rgb8"
-                    )
+                # State remap: sim JointState is
+                #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
+                # Server expects:
+                #   left_arm(7), right_arm(7), left_effector(1), right_effector(1), head_position(2), waist_pitch(1), waist_lift(1)
+                states = np.stack(state_buffer)
+                left_arm = states[:, 0:7]
+                left_eff = states[:, 7:8]
+                right_arm = states[:, 8:15]
+                right_eff = states[:, 15:16]
+                waist_pitch = states[:, 16:17]
+                waist_lift = states[:, 17:18]
+                head_pos = states[:, 18:20]
 
-                    img_l = bridge.compressed_imgmsg_to_cv2(
-                        img_l_raw, desired_encoding="rgb8"
-                    )
+                obs = {
+                    "video.top_head": img_h_seq,
+                    "video.hand_left": img_l_seq,
+                    "video.hand_right": img_r_seq,
+                    "state.left_arm_joint_position": left_arm,
+                    "state.right_arm_joint_position": right_arm,
+                    "state.left_effector_position": left_eff,
+                    "state.right_effector_position": right_eff,
+                    "state.head_position": head_pos,
+                    "state.waist_pitch": waist_pitch,
+                    "state.waist_lift": waist_lift,
+                    "annotation.language.action_text": instruction,
+                }
 
-                    img_r = bridge.compressed_imgmsg_to_cv2(
-                        img_r_raw, desired_encoding="rgb8"
-                    )
+                # print all observation shapes
+                for key, value in obs.items():
+                    print(f"obs[{key}]: {value.shape if isinstance(value, np.ndarray) else type(value)}")
 
-                    # Remote policy server expects 480x640x3.
-                    img_h = resize_rgb(img_h, target_h, target_w)
-                    img_l = resize_rgb(img_l, target_h, target_w)
-                    img_r = resize_rgb(img_r, target_h, target_w)
-
-                    state = np.array(act_raw.position)
-
-                    # Build an observation matching test_client.py format.
-                    # Video observations are batched: (num_frames, H, W, C)
-                    obs = {
-                        "video.top_head": img_h[None, ...],
-                        "video.hand_left": img_l[None, ...],
-                        "video.hand_right": img_r[None, ...],
-                    }
-
-                    # State remap: demo_infer JointState is
-                    #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
-                    # Server expects:
-                    #   left_arm(7), right_arm(7), left_effector(1), right_effector(1), head_position(2), waist_pitch(1), waist_lift(1)
-                    left_arm = state[0:7]
-                    left_eff = state[7:8]
-                    right_arm = state[8:15]
-                    right_eff = state[15:16]
-                    waist_pitch = state[16:17]
-                    waist_lift = state[17:18]
-                    head_pos = state[18:20]
-
-                    obs.update(
-                        {
-                            "state.left_arm_joint_position": left_arm[None, :].astype(np.float64, copy=False),
-                            "state.right_arm_joint_position": right_arm[None, :].astype(np.float64, copy=False),
-                            "state.left_effector_position": left_eff[None, :].astype(np.float64, copy=False),
-                            "state.right_effector_position": right_eff[None, :].astype(np.float64, copy=False),
-                            "state.head_position": head_pos[None, :].astype(np.float64, copy=False),
-                            "state.waist_pitch": waist_pitch[None, :].astype(np.float64, copy=False),
-                            "state.waist_lift": waist_lift[None, :].astype(np.float64, copy=False),
-                            "annotation.language.action_text": instruction or "",
-                        }
-                    )
-
-                    action_queue = policy.step(obs)
+                action_queue = policy.step(obs)
+                init_frame = False
 
 
         sim_ros_node.loop_rate.sleep()
@@ -182,22 +192,19 @@ class RemotePolicyClient:
         if not self.recorded_frames:
             return
         
-        print(f"[RemotePolicyClient] Saving debug video with {len(self.recorded_frames)} frames...")
         try:
-            # Frames are concatenated (H, W*3, C) RGB
-            height, width, _ = self.recorded_frames[0].shape
-            # Use a filename that won't be overwritten easily or just a fixed one
+            # Frames are concatenated (T, H, W*3, C) RGB
+            _, height, width, _ = self.recorded_frames[0].shape
+            
+            # Write video with cv2
             filename = "debug_obs.mp4"
-            
-            # cv2 VideoWriter expects BGR
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video = cv2.VideoWriter(filename, fourcc, 30.0, (width, height))
-            
-            for frame in self.recorded_frames:
+            video = cv2.VideoWriter(filename, fourcc, 15.0, (width, height))
+            recorded_frames = np.concatenate(self.recorded_frames, axis=0)
+            for frame in recorded_frames:
                 video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-            
             video.release()
-            print(f"[RemotePolicyClient] Saved {filename}")
+            print(f"[RemotePolicyClient] Saving video with {len(recorded_frames)} frames...")
         except Exception as e:
             print(f"[RemotePolicyClient] Failed to save video: {e}")
 
@@ -260,13 +267,13 @@ class RemotePolicyClient:
     def step(self, obs: dict) -> deque:
         # Record observation for debugging
         try:
-            # Extract latest frames (assuming shape T,H,W,C)
-            img_h = obs["video.top_head"][-1]
-            img_l = obs["video.hand_left"][-1]
-            img_r = obs["video.hand_right"][-1]
+            # Extract latest frames assuming shape (T, H, W, C)
+            img_h = obs["video.top_head"].copy()
+            img_l = obs["video.hand_left"].copy()
+            img_r = obs["video.hand_right"].copy()
             
             # Concatenate horizontally: Left Wrist | Head | Right Wrist
-            combined = np.concatenate([img_l, img_h, img_r], axis=1)
+            combined = np.concatenate([img_l, img_h, img_r], axis=2)
             self.recorded_frames.append(combined)
         except Exception:
             pass
@@ -328,4 +335,10 @@ if __name__ == "__main__":
         verbose=not args.quiet,
     )
 
-    infer(policy, {"instruction": get_instruction(args.task_name)})
+    cfg = {
+        "history_len": 48,
+        "num_subsample_frames": 4,
+        "resize_shape": (480, 640),
+        "task_name": args.task_name,
+    }
+    infer(policy, cfg)
