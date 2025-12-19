@@ -24,6 +24,15 @@ from pathlib import Path
 from PIL import Image
 
 
+# The websockets library by default sends a ping every 20 seconds and
+# expects a pong response within 20 seconds. However, the sever may not
+# send a pong response immediately if it is busy processing a request.
+# Increase the ping interval and timeout so that the client can wait
+# for a longer time before closing the connection.
+PING_INTERVAL_SECS = 60
+PING_TIMEOUT_SECS = 600
+
+
 def load_images_for_step(base_path, step_idx, view_name):
     """Load images for a specific step and view.
     
@@ -88,7 +97,12 @@ async def test_inference(host="localhost", port=8000, num_requests=10, delay_bet
     
     print(f"Connecting to {uri}...")
     
-    async with websockets.connect(uri, max_size=None) as websocket:
+    async with websockets.connect(
+        uri,
+        max_size=None,
+        ping_interval=PING_INTERVAL_SECS,
+        ping_timeout=PING_TIMEOUT_SECS,
+    ) as websocket:
         def _dummy_video(num_frames: int) -> np.ndarray:
             return np.zeros((num_frames, 480, 640, 3), dtype=np.uint8)
 
@@ -188,27 +202,10 @@ async def test_inference(host="localhost", port=8000, num_requests=10, delay_bet
                 # Language/Annotation (string)
                 "annotation.language.action_text": "remove eraser from the whiteboard with right arm",
             }
-            # else: 
-                # obs = {
-                #     # Video observations (batched: num_images,H,W,C)
-                #     "video.top_head": video_top_head,
-                #     "video.hand_left": video_hand_left,
-                #     "video.hand_right": video_hand_right,
-                #     # State observations (batched: B,D)
-                #     "state.left_arm_joint_position": np.zeros((1, 7), dtype=np.float64),
-                #     "state.right_arm_joint_position": np.zeros((1, 7), dtype=np.float64),
-                #     "state.left_effector_position": np.zeros((1, 1), dtype=np.float64),
-                #     "state.right_effector_position": np.zeros((1, 1), dtype=np.float64),
-                #     "state.head_position": np.zeros((1, 2), dtype=np.float64),
-                #     "state.waist_pitch": np.zeros((1, 1), dtype=np.float64),
-                #     "state.waist_lift": np.zeros((1, 1), dtype=np.float64),
-                #     # Language/Annotation (string)
-                #     "annotation.language.action_text": "place the green pear on the blue plate with left hand",
-                # }
             
             print(f"Sending observation data...")
             start_time = time.time()
-            
+
             # Send observation
             await websocket.send(packer.pack(obs))
             
@@ -258,7 +255,12 @@ async def test_long_idle(host="localhost", port=8000, idle_minutes=4, image_base
     
     print(f"Connecting to {uri}...")
     
-    async with websockets.connect(uri, max_size=None) as websocket:
+    async with websockets.connect(
+        uri,
+        max_size=None,
+        ping_interval=PING_INTERVAL_SECS,
+        ping_timeout=PING_TIMEOUT_SECS,
+    ) as websocket:
         # Receive metadata
         metadata_raw = await websocket.recv()
         metadata = msgpack_numpy.unpackb(metadata_raw)

@@ -304,17 +304,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     uri = args.uri or f"ws://{args.host}:{args.port}"
+    video_dir = Path("videos") / datetime.now().strftime("%Y-%m-%d")
+    video_dir.mkdir(parents=True, exist_ok=True)
     policy = RemotePolicyClient(
         uri,
         connect_timeout_s=args.connect_timeout,
         request_timeout_s=args.request_timeout,
         verbose=not args.quiet,
-        video_path=f"videos/{args.task_name}_{datetime.now().strftime('%H-%M-%S')}.mp4",
+        video_path=video_dir / f"{args.task_name}_{datetime.now().strftime('%H-%M-%S')}.mp4",
     )
 
     cfg = {
         "history_len": 48,
-        "num_subsample_frames": 8,
+        "num_subsample_frames": 4,
         "resize_shape": (480, 640),
         "task_name": args.task_name,
     }
