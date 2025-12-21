@@ -23,6 +23,7 @@ from openpi_client import msgpack_numpy
 
 from genie_sim_ros import SimROSNode
 from instructions import get_instruction
+from policy_client import RemotePolicyClient
 
 
 def set_seed(seed):
@@ -64,14 +65,22 @@ def infer(policy, cfg):
 
     state_buffer = deque(maxlen=1)
     image_buffer = deque(maxlen=num_subsample_frames)
-    frame_idx = 0
     init_frame = True
+    frame_idx = 0
+    is_chunk_end = False
 
     while rclpy.ok():
+        # Wait for sim to be ready
+        sim_time = get_sim_time(sim_ros_node)
+        if sim_time <= SIM_INIT_TIME:
+            sim_ros_node.loop_rate.sleep()
+            continue
+            
         img_h_raw = sim_ros_node.get_img_head()
         img_l_raw = sim_ros_node.get_img_left_wrist()
         img_r_raw = sim_ros_node.get_img_right_wrist()
         act_raw = sim_ros_node.get_joint_state()
+        infer_start = sim_ros_node.is_infer_start()
 
         if ( 
             img_h_raw
@@ -80,38 +89,46 @@ def infer(policy, cfg):
             and act_raw
             and img_h_raw.header.stamp == img_l_raw.header.stamp == img_r_raw.header.stamp
         ):
-            sim_time = get_sim_time(sim_ros_node)
-            if sim_time > SIM_INIT_TIME:
-                print("cur sim time", sim_time, img_h_raw.header.stamp)
+            print("cur sim time", sim_time, img_h_raw.header.stamp) 
+            print(f"init_frame: {init_frame}, infer_start: {infer_start}, frame_idx: {frame_idx}")
 
-                # Save images at an interval
-                if init_frame or frame_idx % subsample_interval == 0:
-                    img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="rgb8")
-                    img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="rgb8")
-                    img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="rgb8")
-                    img_h = resize_rgb(img_h, *cfg["resize_shape"])
-                    img_l = resize_rgb(img_l, *cfg["resize_shape"])
-                    img_r = resize_rgb(img_r, *cfg["resize_shape"])
-                    image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
-                
-                # Save latest state
+            if action_queue and not is_chunk_end:
+                # Set is_end based on subsampling interval
+                is_chunk_end = (len(action_queue) % subsample_interval) == 1
+                sim_ros_node.publish_joint_command(action_queue.popleft(), is_chunk_end)
+            elif init_frame or infer_start:
+                print(f"========================> frame_idx: {frame_idx}, action_queue length: {len(action_queue) if action_queue else 0}")
+
+                # Update image buffer
+                img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="rgb8")
+                img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="rgb8")
+                img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="rgb8")
+                img_h = resize_rgb(img_h, *cfg["resize_shape"])
+                img_l = resize_rgb(img_l, *cfg["resize_shape"])
+                img_r = resize_rgb(img_r, *cfg["resize_shape"])
+                image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
+
+                # Update state buffer
                 state = np.array(act_raw.position).astype(np.float64)
                 state_buffer.append(state)
 
-            if action_queue:
-                is_end = True if len(action_queue) == 1 else False
-                sim_ros_node.publish_joint_command(action_queue.popleft(), is_end)
-                frame_idx += 1 # increment only when action is taken
-            else:
-                infer_start = sim_ros_node.is_infer_start()
-                if (
-                    (init_frame or infer_start) 
-                    and len(state_buffer) > 0
-                    and len(image_buffer) > 0
-                ):
+                frame_idx += 1
+                if is_chunk_end:
+                    is_chunk_end = False
+
+                if not action_queue:
                     img_h_seq = np.stack([f["img_h"] for f in image_buffer])
                     img_l_seq = np.stack([f["img_l"] for f in image_buffer])
                     img_r_seq = np.stack([f["img_r"] for f in image_buffer])
+
+                    # Save images locally for debugging
+                    # concatenate vertically: Left Wrist | Head | Right Wrist and then horizontally stack all frames
+                    os.makedirs("debug_img", exist_ok=True)
+                    debug_img_h = img_h_seq.transpose((1, 0, 2, 3)).reshape(cfg["resize_shape"][0], -1, 3)
+                    debug_img_l = img_l_seq.transpose((1, 0, 2, 3)).reshape(cfg["resize_shape"][0], -1, 3)
+                    debug_img_r = img_r_seq.transpose((1, 0, 2, 3)).reshape(cfg["resize_shape"][0], -1, 3)
+                    debug_img = np.concatenate([debug_img_l, debug_img_h, debug_img_r], axis=0)
+                    cv2.imwrite(f"debug_img/frame_{frame_idx:04d}.png", cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR))
 
                     # State remap: sim JointState is
                     #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
@@ -148,139 +165,8 @@ def infer(policy, cfg):
                     init_frame = False
 
 
-        sim_ros_node.loop_rate.sleep()
-
-class RemotePolicyClient:
-    """Policy client that queries a remote websocket policy server.
-
-    Protocol:
-    - Connect to ws://host:port
-    - Server sends a metadata msgpack message on connect
-    - Client sends msgpack-packed observation dict
-    - Server replies with msgpack-packed action payload (dict or ndarray)
-    """
-
-    def __init__(
-        self,
-        uri: str,
-        *,
-        connect_timeout_s: float = 10.0,
-        request_timeout_s: float = 60.0,
-        verbose: bool = True,
-        video_path: str = "",
-    ):
-        self._uri = uri
-        self._connect_timeout_s = float(connect_timeout_s)
-        self._request_timeout_s = float(request_timeout_s)
-        self._verbose = bool(verbose)
-        self._video_path = video_path
-
-        self._loop = None
-        self._thread = None
-        self._ws = None
-        self._packer = msgpack_numpy.Packer()
-        self._connected = threading.Event()
-        self._lock = threading.Lock()
-
-        self.recorded_frames = []
-        atexit.register(self.save_video)
-
-        self._start_loop_thread()
-        self._ensure_connected_sync()
-
-    def save_video(self):
-        if not self.recorded_frames:
-            return
-        
-        # Frames are concatenated (T, H, W*3, C) RGB
-        _, height, width, _ = self.recorded_frames[0].shape
-        
-        # Write video with cv2
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video = cv2.VideoWriter(self._video_path, fourcc, 15.0, (width, height))
-        recorded_frames = np.concatenate(self.recorded_frames, axis=0)
-        for frame in recorded_frames:
-            video.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-        video.release()
-        if self._verbose:
-            print(f"[RemotePolicyClient] Saving video with {len(recorded_frames)} frames...")
-
-    def _start_loop_thread(self):
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-
-        def _run():
-            asyncio.set_event_loop(loop)
-            loop.run_forever()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        self._thread = t
-
-    async def _connect_async(self):
-        self._connected.clear()
-        if self._ws is not None:
-            await self._ws.close()
-            self._ws = None
-
-        self._ws = await asyncio.wait_for(
-            websockets.connect(self._uri, max_size=None), timeout=self._connect_timeout_s
-        )
-
-        # Receive metadata (server sends it immediately on connect).
-        metadata_raw = await asyncio.wait_for(
-            self._ws.recv(), timeout=self._connect_timeout_s
-        )
-        metadata = msgpack_numpy.unpackb(metadata_raw)
-        if self._verbose:
-            print(f"[RemotePolicyClient] Connected to {self._uri}. Metadata: {metadata}")
-
-        self._connected.set()
-
-    def _ensure_connected_sync(self):
-        fut = asyncio.run_coroutine_threadsafe(self._connect_async(), self._loop)
-        fut.result(timeout=self._connect_timeout_s + 5.0)
-
-    async def _step_async(self, obs: dict):
-        if self._ws is None:
-            await self._connect_async()
-
-        # Serialize + send
-        await self._ws.send(self._packer.pack(obs))
-
-        # Receive
-        action_raw = await asyncio.wait_for(self._ws.recv(), timeout=self._request_timeout_s)
-        if isinstance(action_raw, str):
-            raise RuntimeError(f"Server returned error:\n{action_raw}")
-        return msgpack_numpy.unpackb(action_raw)
-
-    def step(self, obs: dict) -> deque:
-        # Record observation for debugging
-        img_h = obs["video.top_head"].copy()
-        img_l = obs["video.hand_left"].copy()
-        img_r = obs["video.hand_right"].copy()
-        
-        # Concatenate horizontally: Left Wrist | Head | Right Wrist
-        combined = np.concatenate([img_l, img_h, img_r], axis=2)
-        self.recorded_frames.append(combined)
-
-        with self._lock:
-            fut = asyncio.run_coroutine_threadsafe(self._step_async(obs), self._loop)
-            payload = fut.result(timeout=self._request_timeout_s + 5.0)
-
-        # Simplified action processing
-        # Assume payload is a dict with the correct keys
-        left_arm = np.asarray(payload["action.left_arm_joint_position"])
-        right_arm = np.asarray(payload["action.right_arm_joint_position"])
-        left_eff = np.asarray(payload["action.left_effector_position"])[:, None]
-        right_eff = np.asarray(payload["action.right_effector_position"])[:, None]
-
-        # Concatenate: [left_arm(7), left_eff(1), right_arm(7), right_eff(1)]
-        joint_seq = np.concatenate(
-            [left_arm, left_eff, right_arm, right_eff], axis=1
-        ).astype(np.float64)
-        return deque([step for step in joint_seq])
-
+        for _ in range(5):
+            sim_ros_node.loop_rate.sleep()
 
 if __name__ == "__main__":
     import argparse
