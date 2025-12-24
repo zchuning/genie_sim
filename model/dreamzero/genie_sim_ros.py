@@ -141,6 +141,10 @@ class SimROSNode(Node):
             "idx66_arm_r_joint6",
             "idx67_arm_r_joint7",
             "idx81_gripper_r_outer_joint1",
+            "idx01_body_joint1",
+            "idx02_body_joint2",
+            "idx11_head_joint1",
+            "idx12_head_joint2",
         ]
         cmd_msg.position = [0.0] * len(cmd_msg.name)
         cmd_msg.position[0] = action[0]
@@ -159,6 +163,10 @@ class SimROSNode(Node):
         cmd_msg.position[13] = action[13]
         cmd_msg.position[14] = action[14]
         cmd_msg.position[15] = np.clip((1 - action[15]), 0, 1)
+        cmd_msg.position[16] = action[16]
+        cmd_msg.position[17] = action[17]
+        cmd_msg.position[18] = action[18]
+        cmd_msg.position[19] = action[19]
 
         self.pub_joint_command.publish(cmd_msg)
 

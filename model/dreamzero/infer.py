@@ -139,8 +139,8 @@ def infer(policy, cfg):
                     left_eff = states[:, 7:8]
                     right_arm = states[:, 8:15]
                     right_eff = states[:, 15:16]
-                    waist_pitch = states[:, 16:17]
-                    waist_lift = states[:, 17:18]
+                    waist_lift = states[:, 16:17]
+                    waist_pitch = states[:, 17:18]
                     head_pos = states[:, 18:20]
 
                     obs = {
@@ -151,11 +151,16 @@ def infer(policy, cfg):
                         "state.right_arm_joint_position": right_arm,
                         "state.left_effector_position": left_eff,
                         "state.right_effector_position": right_eff,
-                        "state.head_position": head_pos,
-                        "state.waist_pitch": waist_pitch,
                         "state.waist_lift": waist_lift,
+                        "state.waist_pitch": waist_pitch,
+                        "state.head_position": head_pos,
                         "annotation.language.action_text": instruction,
                     }
+                    
+                    state = {k: v for k, v in obs.items() if k.startswith("state.")}
+                    from pprint import pformat
+                    pretty_state = pformat(state, indent=2, compact=False)
+                    print(f"==============> Inferrring from state\n{pretty_state}")
 
                     # print all observation shapes
                     for key, value in obs.items():

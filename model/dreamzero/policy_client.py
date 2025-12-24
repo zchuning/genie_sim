@@ -134,9 +134,17 @@ class RemotePolicyClient:
         right_arm = np.asarray(payload["action.right_arm_joint_position"])
         left_eff = np.asarray(payload["action.left_effector_position"])[:, None]
         right_eff = np.asarray(payload["action.right_effector_position"])[:, None]
+        waist_lift = np.asarray(payload["action.waist_lift"])[:, None]
+        waist_pitch = np.asarray(payload["action.waist_pitch"])[:, None]
+        head_pos = np.asarray(payload["action.head_position"])
+        
+        action_dict = {k: v[:4] for k, v in payload.items() if k.startswith("action.")}
+        from pprint import pformat
+        pretty_action_dict = pformat(action_dict, indent=2, compact=False)
+        print(f"+++++++++++++++ Publishing action\n{pretty_action_dict}")
 
-        # Concatenate: [left_arm(7), left_eff(1), right_arm(7), right_eff(1)]
+        # Concatenate: [left_arm(7), left_eff(1), right_arm(7), right_eff(1), waist_lift(1), waist_pitch(1), head_pos(2)]
         joint_seq = np.concatenate(
-            [left_arm, left_eff, right_arm, right_eff], axis=1
+            [left_arm, left_eff, right_arm, right_eff, waist_lift, waist_pitch, head_pos], axis=1
         ).astype(np.float64)
         return deque([step for step in joint_seq])
