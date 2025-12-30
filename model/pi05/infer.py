@@ -2,9 +2,6 @@
 # Author: Genie Sim Team
 # License: Mozilla Public License Version 2.0
 
-import asyncio
-import atexit
-import os
 import sys
 import threading
 from collections import deque
@@ -13,13 +10,11 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-import cv2
 import rclpy
 import numpy as np
 import torch
-import websockets
 from cv_bridge import CvBridge
-from openpi_client import image_tools, msgpack_numpy, websocket_client_policy
+from openpi_client import image_tools, websocket_client_policy
 
 from genie_sim_ros import SimROSNode
 from instructions import get_instruction
@@ -41,14 +36,14 @@ def infer(policy, cfg):
     spin_thread.start()
     bridge = CvBridge()
     SIM_INIT_TIME = 10
-    action_queue = None
-    instruction = get_instruction(cfg["task_name"])
 
+    instruction = get_instruction(cfg["task_name"])
+    exec_horizon = cfg["exec_horizon"]
+
+    action_queue = None
     state_buffer = deque(maxlen=1)
     image_buffer = deque(maxlen=1)
-    init_frame = True
     frame_idx = 0
-    is_chunk_end = False
 
     while rclpy.ok():
         # Wait for sim to be ready
@@ -72,10 +67,10 @@ def infer(policy, cfg):
         ):
             # print("cur sim time", sim_time, img_h_raw.header.stamp) 
             # print(f"init_frame: {init_frame}, infer_start: {infer_start}, frame_idx: {frame_idx}")            
-            if action_queue and not is_chunk_end:
-                is_chunk_end = (len(action_queue) == 1)
-                sim_ros_node.publish_joint_command(action_queue.popleft(), is_chunk_end)
-            elif init_frame or infer_start:
+            if action_queue:
+                is_end = (len(action_queue) == 1)
+                sim_ros_node.publish_joint_command(action_queue.popleft(), is_end)
+            elif frame_idx == 0 or infer_start:
                 # print(f"========================> frame_idx: {frame_idx}, action_queue length: {len(action_queue) if action_queue else 0}")
 
                 # Update image buffer
@@ -91,10 +86,6 @@ def infer(policy, cfg):
                 state = np.array(act_raw.position).astype(np.float64)
                 state_buffer.append(state)
 
-                frame_idx += 1
-                if is_chunk_end:
-                    is_chunk_end = False
-
                 if not action_queue:
                     img_h_seq = np.stack([f["img_h"] for f in image_buffer])[0]
                     img_l_seq = np.stack([f["img_l"] for f in image_buffer])[0]
@@ -109,17 +100,16 @@ def infer(policy, cfg):
                         "prompt": instruction,
                     }
                     
-                    print(f"==============> Inferrring from state\n{state}")
 
-                    # print all observation shapes
+                    print(f"==============> Inferrring from state\n{state}")
                     for key, value in req.items():
                         print(f"req[{key}]: {value.shape if isinstance(value, np.ndarray) else type(value)}")
 
                     actions = policy.infer(req)["action"]
-                    action_queue = deque([a for a in actions])
-                    init_frame = False
+                    action_queue = deque([a for a in actions[: exec_horizon]])
                     print(f"==============> executing actions: {actions[0]}")
 
+                frame_idx += 1
 
         for _ in range(2):
             sim_ros_node.loop_rate.sleep()
@@ -150,5 +140,6 @@ if __name__ == "__main__":
     cfg = {
         "resize_shape": (224, 224),
         "task_name": args.task_name,
+        "exec_horizon": 50,
     }
     infer(policy, cfg)
