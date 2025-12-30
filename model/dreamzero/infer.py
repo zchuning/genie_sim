@@ -2,8 +2,6 @@
 # Author: Genie Sim Team
 # License: Mozilla Public License Version 2.0
 
-import asyncio
-import atexit
 import os
 import sys
 import threading
@@ -17,13 +15,11 @@ import cv2
 import rclpy
 import numpy as np
 import torch
-import websockets
 from cv_bridge import CvBridge
-from openpi_client import msgpack_numpy
+from openpi_client import image_tools, websocket_client_policy
 
 from genie_sim_ros import SimROSNode
 from instructions import get_instruction
-from policy_client import RemotePolicyClient
 
 
 def set_seed(seed):
@@ -34,19 +30,6 @@ def set_seed(seed):
 def get_sim_time(sim_ros_node):
     sim_time = sim_ros_node.get_clock().now().nanoseconds * 1e-9
     return sim_time
-
-
-def resize_rgb(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-    if img is None:
-        return img
-    img = np.asarray(img)
-    if img.ndim != 3 or img.shape[2] != 3:
-        raise ValueError(f"Expected HxWx3 RGB image, got shape {img.shape}")
-    if img.shape[0] == target_h and img.shape[1] == target_w:
-        return img.astype(np.uint8, copy=False)
-    resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
-    return resized.astype(np.uint8, copy=False)
-
 
 def infer(policy, cfg):
     rclpy.init()
@@ -61,7 +44,7 @@ def infer(policy, cfg):
     # Buffers: keep dense states and subsampled images
     history_len = cfg["history_len"] 
     num_subsample_frames = cfg["num_subsample_frames"]
-    subsample_interval = history_len // num_subsample_frames
+    subsample_interval = history_len // (num_subsample_frames - 1)
 
     state_buffer = deque(maxlen=1)
     image_buffer = deque(maxlen=num_subsample_frames)
@@ -89,23 +72,24 @@ def infer(policy, cfg):
             and act_raw
             and img_h_raw.header.stamp == img_l_raw.header.stamp == img_r_raw.header.stamp
         ):
-            print("cur sim time", sim_time, img_h_raw.header.stamp) 
-            print(f"init_frame: {init_frame}, infer_start: {infer_start}, frame_idx: {frame_idx}")
-
+            # print("cur sim time", sim_time, img_h_raw.header.stamp) 
+            # print(f"init_frame: {init_frame}, infer_start: {infer_start}, frame_idx: {frame_idx}")            
             if action_queue and not is_chunk_end:
                 # Set is_end based on subsampling interval
-                is_chunk_end = (len(action_queue) % subsample_interval) == 1
+                is_chunk_end = (len(action_queue) == history_len) or (len(action_queue) % subsample_interval) == 1
+                if is_chunk_end:
+                    print(f"========================> saving frame at action_queue length {len(action_queue)}")
                 sim_ros_node.publish_joint_command(action_queue.popleft(), is_chunk_end)
             elif init_frame or infer_start:
-                print(f"========================> frame_idx: {frame_idx}, action_queue length: {len(action_queue) if action_queue else 0}")
+                # print(f"========================> frame_idx: {frame_idx}, action_queue length: {len(action_queue) if action_queue else 0}")
 
                 # Update image buffer
-                img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="rgb8")
-                img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="rgb8")
-                img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="rgb8")
-                img_h = resize_rgb(img_h, *cfg["resize_shape"])
-                img_l = resize_rgb(img_l, *cfg["resize_shape"])
-                img_r = resize_rgb(img_r, *cfg["resize_shape"])
+                img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="bgr8")
+                img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="bgr8")
+                img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="bgr8")
+                img_h = image_tools.resize_with_pad(img_h, *cfg["resize_shape"])
+                img_l = image_tools.resize_with_pad(img_l, *cfg["resize_shape"])
+                img_r = image_tools.resize_with_pad(img_r, *cfg["resize_shape"])
                 image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
 
                 # Update state buffer
@@ -131,9 +115,7 @@ def infer(policy, cfg):
                     cv2.imwrite(f"debug_img/frame_{frame_idx:04d}.png", cv2.cvtColor(debug_img, cv2.COLOR_RGB2BGR))
 
                     # State remap: sim JointState is
-                    #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_pitch(1), waist_lift(1), head_position(2)]
-                    # Server expects:
-                    #   left_arm(7), right_arm(7), left_effector(1), right_effector(1), head_position(2), waist_pitch(1), waist_lift(1)
+                    #   [left_arm(7), left_gripper(1), right_arm(7), right_gripper(1), waist_lift(1), waist_pitch(1), head_position(2)]
                     states = np.stack(state_buffer)
                     left_arm = states[:, 0:7]
                     left_eff = states[:, 7:8]
@@ -166,11 +148,25 @@ def infer(policy, cfg):
                     for key, value in obs.items():
                         print(f"obs[{key}]: {value.shape if isinstance(value, np.ndarray) else type(value)}")
 
-                    action_queue = policy.step(obs)
+                    actions = policy.infer(obs)
+                    left_arm = np.asarray(actions["action.left_arm_joint_position"])
+                    right_arm = np.asarray(actions["action.right_arm_joint_position"])
+                    left_eff = np.asarray(actions["action.left_effector_position"])[:, None]
+                    right_eff = np.asarray(actions["action.right_effector_position"])[:, None]
+                    waist_lift = np.asarray(actions["action.waist_lift"])[:, None]
+                    waist_pitch = np.asarray(actions["action.waist_pitch"])[:, None]
+                    head_pos = np.asarray(actions["action.head_position"])
+
+                    # Concatenate: [left_arm(7), left_eff(1), right_arm(7), right_eff(1), waist_lift(1), waist_pitch(1), head_pos(2)]
+                    joint_seq = np.concatenate(
+                        [left_arm, left_eff, right_arm, right_eff, waist_lift, waist_pitch, head_pos], axis=1
+                    ).astype(np.float64)
+                    action_queue = deque([step for step in joint_seq])
+
                     init_frame = False
 
 
-        for _ in range(5):
+        for _ in range(2):
             sim_ros_node.loop_rate.sleep()
 
 if __name__ == "__main__":
@@ -197,13 +193,7 @@ if __name__ == "__main__":
     uri = args.uri or f"ws://{args.host}:{args.port}"
     video_dir = Path("videos") / datetime.now().strftime("%Y-%m-%d")
     video_dir.mkdir(parents=True, exist_ok=True)
-    policy = RemotePolicyClient(
-        uri,
-        connect_timeout_s=args.connect_timeout,
-        request_timeout_s=args.request_timeout,
-        verbose=not args.quiet,
-        video_path=video_dir / f"{args.task_name}_{datetime.now().strftime('%H-%M-%S')}.mp4",
-    )
+    policy = websocket_client_policy.WebsocketClientPolicy("0.0.0.0", args.port)
 
     cfg = {
         "history_len": 48,
