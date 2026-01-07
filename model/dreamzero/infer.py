@@ -26,10 +26,20 @@ def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-
 def get_sim_time(sim_ros_node):
     sim_time = sim_ros_node.get_clock().now().nanoseconds * 1e-9
     return sim_time
+
+def resize_rgb(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    if img is None:
+        return img
+    img = np.asarray(img)
+    if img.ndim != 3 or img.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB image, got shape {img.shape}")
+    if img.shape[0] == target_h and img.shape[1] == target_w:
+        return img.astype(np.uint8, copy=False)
+    resized = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    return resized.astype(np.uint8, copy=False)
 
 def infer(policy, cfg):
     rclpy.init()
@@ -87,9 +97,9 @@ def infer(policy, cfg):
                 img_h = bridge.compressed_imgmsg_to_cv2(img_h_raw, desired_encoding="bgr8")
                 img_l = bridge.compressed_imgmsg_to_cv2(img_l_raw, desired_encoding="bgr8")
                 img_r = bridge.compressed_imgmsg_to_cv2(img_r_raw, desired_encoding="bgr8")
-                img_h = image_tools.resize_with_pad(img_h, *cfg["resize_shape"])
-                img_l = image_tools.resize_with_pad(img_l, *cfg["resize_shape"])
-                img_r = image_tools.resize_with_pad(img_r, *cfg["resize_shape"])
+                img_h = resize_rgb(img_h, *cfg["resize_shape"])
+                img_l = resize_rgb(img_l, *cfg["resize_shape"])
+                img_r = resize_rgb(img_r, *cfg["resize_shape"])
                 image_buffer.append({"img_h": img_h, "img_l": img_l, "img_r": img_r})
 
                 # Update state buffer
